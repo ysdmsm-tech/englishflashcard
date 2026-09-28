@@ -76,6 +76,8 @@
   .settings h2 { margin: 0 0 8px; font-size: .95rem; color: var(--muted); font-weight: 700; }
   .toggle { display: flex; align-items: center; gap: 10px; cursor: pointer; }
   .toggle input { width: 20px; height: 20px; accent-color: var(--accent); }
+  button.secondary[aria-pressed="true"] { background: var(--accent); color: var(--accent-ink); }
+  .heard { margin: 12px 0 0; text-align: center; color: var(--muted); min-height: 1.6em; }
 
   :focus-visible { outline: 3px solid #1f6feb; outline-offset: 2px; }
   [hidden] { display: none !important; }
@@ -87,6 +89,7 @@
   <select id="mode" aria-label="学習モード">
     <option value="en2ja">英語 → 日本語</option>
     <option value="ja2en">日本語 → 英語</option>
+    <option value="speak">発音（日本語を見て英語を話す）</option>
   </select>
 </header>
 
@@ -97,9 +100,11 @@
     <p id="answer" class="answer" hidden aria-live="polite"></p>
     <p id="notice" class="notice" hidden></p>
   </section>
+  <p id="heard" class="heard" aria-live="polite" hidden></p>
   <div class="actions">
     <button id="advance" class="primary" type="button">答えを見る</button>
     <button id="replay" class="secondary" type="button">もう一度聞く（R）</button>
+    <button id="micBtn" class="secondary" type="button" aria-pressed="false" hidden>マイク：OFF</button>
   </div>
   <p class="hint">Enterで進む ／ Rでもう一度聞く</p>
 
@@ -116,6 +121,7 @@
 <script>
 // ===== 設定（ここを書き換えるだけで調整できます） =====
 const CONFIG = {
+  AUTO_NEXT_MS: 1500,       // 発音モードで正解したあと、次のカードへ進むまでの待ち時間（ミリ秒）
   SPEECH_LANG: 'en-US',     // 読み上げの言語
   SPEECH_RATE: 0.9,         // 読み上げ速度（1が標準）
   API_URL: 'https://script.google.com/macros/s/AKfycbxoGgqpoY30TjU2XTUgIGDswn3EFBLrJSKO488ya63dNPsdtPggh_aJKHI1Ecq57dadjQ/exec',
@@ -136,6 +142,7 @@ const state = {
 // ===== 要素 =====
 const $ = id => document.getElementById(id);
 const el = {
+  micBtn: $('micBtn'), heard: $('heard'),
   replay: $('replay'), audioToggle: $('audioToggle'), audioNote: $('audioNote'),
   mode: $('mode'), progress: $('progress'), question: $('question'),
   answer: $('answer'), notice: $('notice'), advance: $('advance')
@@ -202,6 +209,7 @@ function speak(text) {
   u.lang = CONFIG.SPEECH_LANG;
   u.rate = CONFIG.SPEECH_RATE;
   if (speech.voice) u.voice = speech.voice;
+  u.onend = () => { mic.lockUntil = Date.now() + 400; }; // 自分の声を聞き取らないための余白
   synth.speak(u);
 }
 
@@ -227,9 +235,111 @@ function saveAudioSetting(on) {
   try { localStorage.setItem('wordloop.audio', on ? 'on' : 'off'); } catch (e) { /* 保存できなくても動作は続ける */ }
 }
 
+// ===== 音声入力（発音モード） =====
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+const mic = { supported: !!SR, rec: null, on: false, paused: false, lockUntil: 0, timer: null };
+
+// 大文字小文字・記号・余分な空白の差を吸収する
+function normalize(text) {
+  return String(text).toLowerCase()
+    .replace(/[-_]/g, ' ')
+    .replace(/[^a-z0-9\s]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function showHeard(text) { el.heard.textContent = text; }
+
+function createRec() {
+  const rec = new SR();
+  rec.lang = CONFIG.SPEECH_LANG;
+  rec.continuous = true;        // 連続認識
+  rec.interimResults = true;    // 認識途中の文字も受け取る
+  rec.maxAlternatives = 3;      // 候補を複数もらい、正解に一致するものを採用する
+  rec.onresult = onMicResult;
+  rec.onerror = onMicError;
+  rec.onend = () => { if (mic.on && !mic.paused) scheduleRestart(); }; // 無音で止まっても自動で再開
+  return rec;
+}
+
+function startRec() {
+  if (!mic.supported || !mic.on || mic.paused) return;
+  if (!mic.rec) mic.rec = createRec();
+  try { mic.rec.start(); } catch (e) { /* すでに開始済み */ }
+}
+function scheduleRestart() { clearTimeout(mic.timer); mic.timer = setTimeout(startRec, 300); }
+function stopRec() {
+  clearTimeout(mic.timer);
+  if (mic.rec) { try { mic.rec.stop(); } catch (e) { /* 何もしない */ } }
+}
+
+function setMic(on) {
+  mic.on = on;
+  mic.paused = false;
+  if (on) startRec(); else stopRec();
+  updateMic();
+}
+function stopMic() { if (mic.on) setMic(false); }
+
+function onMicError(e) {
+  if (e.error === 'no-speech' || e.error === 'aborted') return; // 無音・中断は問題なし
+  const messages = {
+    'not-allowed': 'マイクの使用が許可されていません。ブラウザの設定で許可してください。',
+    'service-not-allowed': 'このブラウザでは音声認識を利用できません。',
+    'audio-capture': 'マイクが見つかりません。接続を確認してください。',
+    'network': '音声認識のためのネットワークに接続できません。'
+  };
+  showHeard(messages[e.error] || ('音声認識エラー: ' + e.error));
+  if (e.error !== 'network') { mic.on = false; updateMic(); }
+}
+
+function onMicResult(e) {
+  if (state.mode !== 'speak' || state.status !== 'ready') return;
+  if (state.revealed || Date.now() < mic.lockUntil) return;
+  if (speech.supported && window.speechSynthesis.speaking) return;
+  const res = e.results[e.results.length - 1];
+  const alts = Array.from(res).map(a => a.transcript);
+  if (!res.isFinal) { showHeard('聞き取り中: ' + alts[0]); return; }
+  judge(alts);
+}
+
+function judge(alts) {
+  const target = normalize(state.cards[state.index].word);
+  if (alts.some(t => normalize(t) === target)) onCorrect();
+  else showHeard('聞き取り: ' + alts[0] + '　→ もう一度どうぞ');
+}
+
+function onCorrect() {
+  showHeard('正解！');
+  state.revealed = true;
+  render();
+  mic.paused = true;            // 読み上げを聞き取らないよう、いったん止める
+  stopRec();
+  autoSpeak();
+  const idx = state.index;
+  setTimeout(() => {
+    mic.paused = false;
+    if (state.status === 'ready' && state.index === idx && state.revealed) advance();
+    startRec();
+  }, CONFIG.AUTO_NEXT_MS);
+}
+
+function updateMic() {
+  const inSpeak = state.mode === 'speak';
+  el.micBtn.hidden = !inSpeak;
+  el.heard.hidden = !inSpeak;
+  el.micBtn.textContent = 'マイク：' + (mic.on ? 'ON' : 'OFF');
+  el.micBtn.setAttribute('aria-pressed', String(mic.on));
+  el.micBtn.disabled = !mic.supported;
+  if (inSpeak && !mic.supported) {
+    showHeard('この端末・ブラウザは音声認識に対応していません（Chromeなどでお試しください）。');
+  }
+}
+
 // ===== 操作 =====
 function restart() {
   state.index = 0;
+  el.heard.textContent = '';
   state.revealed = false;
   state.status = 'ready';
   render();
@@ -246,10 +356,12 @@ function advance() {
   } else {
     state.index += 1;
     state.revealed = false;
+    el.heard.textContent = '';
     if (state.index >= state.cards.length) state.status = 'finished';
   }
   render();
   autoSpeak();
+  if (state.status === 'finished') stopMic();
 }
 
 // ===== 表示 =====
@@ -266,6 +378,7 @@ function showNotice(title, body) {
 function render() {
   renderMain();
   updateReplay();
+  updateMic();
 }
 
 function renderMain() {
@@ -308,6 +421,7 @@ el.advance.addEventListener('click', advance);
 
 el.mode.addEventListener('change', () => {
   state.mode = el.mode.value;
+  if (state.mode !== 'speak') stopMic();
   if (state.status === 'ready') restart();
   el.mode.blur();
 });
@@ -318,6 +432,7 @@ el.mode.addEventListener('change', () => {
 );
 
 el.replay.addEventListener('click', replay);
+el.micBtn.addEventListener('click', () => setMic(!mic.on));
 
 el.audioToggle.addEventListener('change', () => {
   state.audioOn = el.audioToggle.checked;
@@ -330,7 +445,7 @@ el.audioToggle.addEventListener('change', () => {
 document.addEventListener('keydown', e => {
   if (e.isComposing || e.ctrlKey || e.metaKey || e.altKey) return;
   const t = e.target;
-  if (t.tagName === 'SELECT' || t === el.replay || t === el.audioToggle) return;
+  if (t.tagName === 'SELECT' || t === el.replay || t === el.audioToggle || t === el.micBtn) return;
   if (e.key === 'Enter') {
     e.preventDefault();          // ボタンにフォーカスがあっても二重に進まないようにする
     advance();
