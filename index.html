@@ -55,7 +55,7 @@
   .notice { margin: 0; text-align: center; color: var(--muted); }
   .notice strong { display: block; color: var(--ink); font-size: 1.3rem; margin-bottom: 4px; }
 
-  .actions { margin-top: 20px; display: flex; justify-content: center; }
+  .actions { margin-top: 20px; display: flex; justify-content: center; gap: 12px; flex-wrap: wrap; }
   button.primary {
     font: inherit; font-weight: 700; cursor: pointer;
     min-width: 220px; padding: 14px 28px; border: 0; border-radius: 12px;
@@ -63,6 +63,19 @@
   }
   button.primary:disabled { opacity: .5; cursor: default; }
   .hint { margin: 12px 0 0; text-align: center; color: var(--muted); font-size: .9rem; }
+  button.secondary {
+    font: inherit; font-weight: 700; cursor: pointer;
+    padding: 12px 20px; border: 2px solid var(--accent); border-radius: 12px;
+    background: var(--surface); color: var(--accent);
+  }
+  button.secondary:disabled { opacity: .45; cursor: default; }
+  .settings {
+    margin-top: 24px; padding: 14px 16px;
+    background: var(--surface); border: 1px solid var(--line); border-radius: 12px;
+  }
+  .settings h2 { margin: 0 0 8px; font-size: .95rem; color: var(--muted); font-weight: 700; }
+  .toggle { display: flex; align-items: center; gap: 10px; cursor: pointer; }
+  .toggle input { width: 20px; height: 20px; accent-color: var(--accent); }
 
   :focus-visible { outline: 3px solid #1f6feb; outline-offset: 2px; }
   [hidden] { display: none !important; }
@@ -70,7 +83,7 @@
 </head>
 <body>
 <header class="bar">
-  <h1 class="brand">EnglishCard</h1>
+  <h1 class="brand">WordLoop</h1>
   <select id="mode" aria-label="学習モード">
     <option value="en2ja">英語 → 日本語</option>
     <option value="ja2en">日本語 → 英語</option>
@@ -86,19 +99,33 @@
   </section>
   <div class="actions">
     <button id="advance" class="primary" type="button">答えを見る</button>
+    <button id="replay" class="secondary" type="button">もう一度聞く（R）</button>
   </div>
-  <p class="hint">Enterキーでも操作できます</p>
+  <p class="hint">Enterで進む ／ Rでもう一度聞く</p>
+
+  <section class="settings" aria-label="設定">
+    <h2>設定</h2>
+    <label class="toggle">
+      <input type="checkbox" id="audioToggle" checked>
+      <span>音声（英語を読み上げる）</span>
+    </label>
+    <p id="audioNote" class="hint" hidden>この端末・ブラウザは音声の読み上げに対応していません。</p>
+  </section>
 </main>
 
 <script>
 // ===== 設定（ここを書き換えるだけで調整できます） =====
 const CONFIG = {
+  SPEECH_LANG: 'en-US',     // 読み上げの言語
+  SPEECH_RATE: 0.9,         // 読み上げ速度（1が標準）
   API_URL: 'https://script.google.com/macros/s/AKfycbxoGgqpoY30TjU2XTUgIGDswn3EFBLrJSKO488ya63dNPsdtPggh_aJKHI1Ecq57dadjQ/exec',
   SHUFFLE: false            // true にするとカードの順番をランダムにする
 };
 
 // ===== 状態 =====
 const state = {
+  audioOn: true,     // 音声の読み上げ ON/OFF
+  interacted: false, // ユーザーが一度でも操作したか（ブラウザの自動再生制限への対応）
   cards: [],       // [{ word, meaning }]
   index: 0,
   revealed: false,
@@ -109,6 +136,7 @@ const state = {
 // ===== 要素 =====
 const $ = id => document.getElementById(id);
 const el = {
+  replay: $('replay'), audioToggle: $('audioToggle'), audioNote: $('audioNote'),
   mode: $('mode'), progress: $('progress'), question: $('question'),
   answer: $('answer'), notice: $('notice'), advance: $('advance')
 };
@@ -140,12 +168,72 @@ async function loadCards() {
   }
 }
 
+// ===== 音声出力 =====
+const speech = {
+  supported: 'speechSynthesis' in window && 'SpeechSynthesisUtterance' in window,
+  voice: null
+};
+
+function pickVoice() {
+  if (!speech.supported) return;
+  const voices = window.speechSynthesis.getVoices();
+  speech.voice = voices.find(v => v.lang === CONFIG.SPEECH_LANG)
+              || voices.find(v => v.lang && v.lang.startsWith('en'))
+              || null;
+}
+if (speech.supported) {
+  pickVoice();
+  window.speechSynthesis.addEventListener('voiceschanged', pickVoice);
+}
+
+// いま画面に見えている英語（見えていなければ null）
+function currentEnglish() {
+  if (state.status !== 'ready') return null;
+  const card = state.cards[state.index];
+  if (state.mode === 'en2ja') return card.word;
+  return state.revealed ? card.word : null;
+}
+
+function speak(text) {
+  if (!speech.supported || !state.audioOn || !text) return;
+  const synth = window.speechSynthesis;
+  synth.cancel();
+  const u = new SpeechSynthesisUtterance(text);
+  u.lang = CONFIG.SPEECH_LANG;
+  u.rate = CONFIG.SPEECH_RATE;
+  if (speech.voice) u.voice = speech.voice;
+  synth.speak(u);
+}
+
+// 英語が表示されたタイミングで自動再生する
+//  英語→日本語：カードを出したとき / 日本語→英語：答えを出したとき
+function autoSpeak() {
+  if (!speech.supported || !state.interacted) return;
+  if (state.status !== 'ready') { window.speechSynthesis.cancel(); return; }
+  const shouldSpeak = state.mode === 'en2ja' ? !state.revealed : state.revealed;
+  if (shouldSpeak) speak(currentEnglish());
+}
+
+function replay() { speak(currentEnglish()); }
+
+function updateReplay() {
+  el.replay.disabled = !(speech.supported && state.audioOn && currentEnglish());
+}
+
+function loadAudioSetting() {
+  try { return localStorage.getItem('wordloop.audio') !== 'off'; } catch (e) { return true; }
+}
+function saveAudioSetting(on) {
+  try { localStorage.setItem('wordloop.audio', on ? 'on' : 'off'); } catch (e) { /* 保存できなくても動作は続ける */ }
+}
+
 // ===== 操作 =====
 function restart() {
   state.index = 0;
   state.revealed = false;
   state.status = 'ready';
   render();
+  autoSpeak();
 }
 
 function advance() {
@@ -161,6 +249,7 @@ function advance() {
     if (state.index >= state.cards.length) state.status = 'finished';
   }
   render();
+  autoSpeak();
 }
 
 // ===== 表示 =====
@@ -175,6 +264,11 @@ function showNotice(title, body) {
 }
 
 function render() {
+  renderMain();
+  updateReplay();
+}
+
+function renderMain() {
   const s = state;
   el.question.hidden = s.status !== 'ready';
   el.notice.hidden = s.status === 'ready';
@@ -218,13 +312,41 @@ el.mode.addEventListener('change', () => {
   el.mode.blur();
 });
 
-document.addEventListener('keydown', e => {
-  if (e.key !== 'Enter' || e.isComposing) return;
-  if (e.target.tagName === 'SELECT') return;
-  e.preventDefault();            // ボタンにフォーカスがあっても二重に進まないようにする
-  advance();
+// 最初の操作を記録する（この後に読み上げが許可される）
+['pointerdown', 'keydown'].forEach(type =>
+  document.addEventListener(type, () => { state.interacted = true; }, { capture: true })
+);
+
+el.replay.addEventListener('click', replay);
+
+el.audioToggle.addEventListener('change', () => {
+  state.audioOn = el.audioToggle.checked;
+  saveAudioSetting(state.audioOn);
+  if (!state.audioOn && speech.supported) window.speechSynthesis.cancel();
+  render();
+  if (state.audioOn) replay();   // ONにした直後に試し聞きできる
 });
 
+document.addEventListener('keydown', e => {
+  if (e.isComposing || e.ctrlKey || e.metaKey || e.altKey) return;
+  const t = e.target;
+  if (t.tagName === 'SELECT' || t === el.replay || t === el.audioToggle) return;
+  if (e.key === 'Enter') {
+    e.preventDefault();          // ボタンにフォーカスがあっても二重に進まないようにする
+    advance();
+  } else if (e.key === 'r' || e.key === 'R') {
+    e.preventDefault();
+    replay();
+  }
+});
+
+// ===== 起動 =====
+state.audioOn = loadAudioSetting();
+el.audioToggle.checked = state.audioOn;
+if (!speech.supported) {
+  el.audioToggle.disabled = true;
+  el.audioNote.hidden = false;
+}
 loadCards();
 </script>
 </body>
