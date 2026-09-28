@@ -1,27 +1,231 @@
 <!DOCTYPE html>
 <html lang="ja">
 <head>
-  <meta charset="UTF-8">
-  <meta name="robots" content="noindex, nofollow">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>WordLoop</title>
+<meta charset="UTF-8">
+<meta name="robots" content="noindex, nofollow">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WordLoop</title>
+<style>
+  :root {
+    --bg: #eef2f5;
+    --surface: #ffffff;
+    --ink: #1b2733;
+    --muted: #5d6b78;
+    --line: #d5dde4;
+    --accent: #0f6b64;
+    --accent-ink: #ffffff;
+    box-sizing: border-box;
+  }
+  *, *::before, *::after { box-sizing: inherit; }
+  html, body { margin: 0; min-height: 100%; }
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font-family: "Hiragino Sans", "Yu Gothic UI", "Meiryo", "Noto Sans JP", system-ui, sans-serif;
+    line-height: 1.6;
+  }
+
+  .bar {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 12px; padding: 12px 16px;
+    background: var(--surface); border-bottom: 1px solid var(--line);
+  }
+  .brand { margin: 0; font-size: 1.15rem; font-weight: 700; letter-spacing: .02em; }
+  select {
+    font: inherit; color: inherit; background: var(--surface);
+    border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px;
+  }
+
+  main { max-width: 640px; margin: 0 auto; padding: 20px 16px 40px; }
+  .progress { margin: 0 0 10px; color: var(--muted); font-size: .95rem; min-height: 1.6em; }
+
+  .card {
+    background: var(--surface); border: 1px solid var(--line); border-radius: 16px;
+    padding: 32px 24px; min-height: 260px;
+    display: flex; flex-direction: column; justify-content: center; gap: 24px;
+  }
+  .question {
+    margin: 0; text-align: center; font-weight: 700;
+    font-size: clamp(2rem, 9vw, 3.4rem); line-height: 1.25; overflow-wrap: anywhere;
+  }
+  .answer {
+    margin: 0; padding: 12px 0 0 16px; border-left: 4px solid var(--accent);
+    font-size: clamp(1.3rem, 5vw, 1.8rem); overflow-wrap: anywhere;
+  }
+  .notice { margin: 0; text-align: center; color: var(--muted); }
+  .notice strong { display: block; color: var(--ink); font-size: 1.3rem; margin-bottom: 4px; }
+
+  .actions { margin-top: 20px; display: flex; justify-content: center; }
+  button.primary {
+    font: inherit; font-weight: 700; cursor: pointer;
+    min-width: 220px; padding: 14px 28px; border: 0; border-radius: 12px;
+    background: var(--accent); color: var(--accent-ink);
+  }
+  button.primary:disabled { opacity: .5; cursor: default; }
+  .hint { margin: 12px 0 0; text-align: center; color: var(--muted); font-size: .9rem; }
+
+  :focus-visible { outline: 3px solid #1f6feb; outline-offset: 2px; }
+  [hidden] { display: none !important; }
+</style>
 </head>
 <body>
-  <h1>WordLoop</h1>
-  <ul id="list"></ul>
-  <script>
-    const API_URL = 'https://script.google.com/macros/s/AKfycbxoGgqpoY30TjU2XTUgIGDswn3EFBLrJSKO488ya63dNPsdtPggh_aJKHI1Ecq57dadjQ/exec';
-    fetch(API_URL)
-      .then(res => res.json())
-      .then(cards => {
-        const list = document.getElementById('list');
-        cards.forEach(c => {
-          const li = document.createElement('li');
-          li.textContent = c.word + ' : ' + c.meaning;
-          list.appendChild(li);
-        });
-      })
-      .catch(err => console.error(err));
-  </script>
+<header class="bar">
+  <h1 class="brand">EnglishCard</h1>
+  <select id="mode" aria-label="学習モード">
+    <option value="en2ja">英語 → 日本語</option>
+    <option value="ja2en">日本語 → 英語</option>
+  </select>
+</header>
+
+<main>
+  <p id="progress" class="progress" aria-live="polite"></p>
+  <section class="card">
+    <p id="question" class="question"></p>
+    <p id="answer" class="answer" hidden aria-live="polite"></p>
+    <p id="notice" class="notice" hidden></p>
+  </section>
+  <div class="actions">
+    <button id="advance" class="primary" type="button">答えを見る</button>
+  </div>
+  <p class="hint">Enterキーでも操作できます</p>
+</main>
+
+<script>
+// ===== 設定（ここを書き換えるだけで調整できます） =====
+const CONFIG = {
+  API_URL: 'https://script.google.com/macros/s/AKfycbxoGgqpoY30TjU2XTUgIGDswn3EFBLrJSKO488ya63dNPsdtPggh_aJKHI1Ecq57dadjQ/exec',
+  SHUFFLE: false            // true にするとカードの順番をランダムにする
+};
+
+// ===== 状態 =====
+const state = {
+  cards: [],       // [{ word, meaning }]
+  index: 0,
+  revealed: false,
+  mode: 'en2ja',   // 'en2ja' | 'ja2en'
+  status: 'loading' // 'loading' | 'ready' | 'finished' | 'error'
+};
+
+// ===== 要素 =====
+const $ = id => document.getElementById(id);
+const el = {
+  mode: $('mode'), progress: $('progress'), question: $('question'),
+  answer: $('answer'), notice: $('notice'), advance: $('advance')
+};
+
+// ===== データ読み込み =====
+function shuffle(list) {
+  const a = list.slice();
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+
+async function loadCards() {
+  state.status = 'loading';
+  render();
+  try {
+    const res = await fetch(CONFIG.API_URL);
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const data = await res.json();
+    if (!Array.isArray(data) || data.length === 0) throw new Error('カードが空です');
+    state.cards = CONFIG.SHUFFLE ? shuffle(data) : data;
+    restart();
+  } catch (err) {
+    console.error(err);
+    state.status = 'error';
+    render();
+  }
+}
+
+// ===== 操作 =====
+function restart() {
+  state.index = 0;
+  state.revealed = false;
+  state.status = 'ready';
+  render();
+}
+
+function advance() {
+  if (state.status === 'loading') return;
+  if (state.status === 'error') { loadCards(); return; }
+  if (state.status === 'finished') { restart(); return; }
+
+  if (!state.revealed) {
+    state.revealed = true;
+  } else {
+    state.index += 1;
+    state.revealed = false;
+    if (state.index >= state.cards.length) state.status = 'finished';
+  }
+  render();
+}
+
+// ===== 表示 =====
+function showNotice(title, body) {
+  el.question.textContent = '';
+  el.answer.hidden = true;
+  el.notice.hidden = false;
+  el.notice.innerHTML = '';
+  const strong = document.createElement('strong');
+  strong.textContent = title;
+  el.notice.append(strong, body);
+}
+
+function render() {
+  const s = state;
+  el.question.hidden = s.status !== 'ready';
+  el.notice.hidden = s.status === 'ready';
+  el.progress.textContent = '';
+
+  if (s.status === 'loading') {
+    showNotice('読み込み中…', '');
+    el.advance.textContent = '答えを見る';
+    el.advance.disabled = true;
+    return;
+  }
+  el.advance.disabled = false;
+
+  if (s.status === 'error') {
+    showNotice('カードを読み込めませんでした', 'ネットワークとAPIの設定を確認して、もう一度お試しください。');
+    el.advance.textContent = '再読み込み';
+    return;
+  }
+  if (s.status === 'finished') {
+    showNotice('全部終わりました', s.cards.length + '枚を学習しました。');
+    el.advance.textContent = 'もう一度';
+    return;
+  }
+
+  const card = s.cards[s.index];
+  const q = s.mode === 'en2ja' ? card.word : card.meaning;
+  const a = s.mode === 'en2ja' ? card.meaning : card.word;
+  el.progress.textContent = (s.index + 1) + ' / ' + s.cards.length;
+  el.question.textContent = q;
+  el.answer.textContent = a;
+  el.answer.hidden = !s.revealed;
+  el.advance.textContent = s.revealed ? '次のカード' : '答えを見る';
+}
+
+// ===== イベント =====
+el.advance.addEventListener('click', advance);
+
+el.mode.addEventListener('change', () => {
+  state.mode = el.mode.value;
+  if (state.status === 'ready') restart();
+  el.mode.blur();
+});
+
+document.addEventListener('keydown', e => {
+  if (e.key !== 'Enter' || e.isComposing) return;
+  if (e.target.tagName === 'SELECT') return;
+  e.preventDefault();            // ボタンにフォーカスがあっても二重に進まないようにする
+  advance();
+});
+
+loadCards();
+</script>
 </body>
 </html>
