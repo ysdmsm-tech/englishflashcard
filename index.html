@@ -7,6 +7,21 @@
   <title>WordLoop</title>
 </head>
 <body>
-  <h1>Hello WordLoop</h1>
+  <h1>WordLoop</h1>
+  <ul id="list"></ul>
+  <script>
+    const API_URL = '1WIWjdyPcOLVPc-8VUSBNFcex8YaBRwhv8GAcXdhu_DyEtWdoempJurL4';
+    fetch(API_URL)
+      .then(res => res.json())
+      .then(cards => {
+        const list = document.getElementById('list');
+        cards.forEach(c => {
+          const li = document.createElement('li');
+          li.textContent = c.word + ' : ' + c.meaning;
+          list.appendChild(li);
+        });
+      })
+      .catch(err => console.error(err));
+  </script>
 </body>
 </html>
